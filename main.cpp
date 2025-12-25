@@ -6,6 +6,8 @@
 #include <sys/mman.h>
 #include <unistd.h>
 #include <mach-o/loader.h>
+#include <mach-o/fat.h>
+#include <arpa/inet.h>
 
 #define ERROR_EXIT(msg) { std::cerr << "Error: " << msg << std::endl; return 1; }
 
@@ -16,6 +18,40 @@ unsigned long hash_djb2(const char *str) {
         hash = ((hash << 5) + hash) + c; /* hash * 33 + c */
     return hash;
 }
+
+/**
+ * 【核心函数】获取适配当前 CPU 的 Mach-O 切片偏移量
+ * * @param map_addr: mmap 映射的整个文件内存起始地址
+ * @param size: 文件总大小
+ * @return: 真正的 mach_header_64 开始的偏移量 (offset)。如果是单架构，返回 0。
+ */
+
+ uint32_t get_best_slice_offset(void* map_addr, size_t size){
+    uint32_t magic = *(u_int32_t*) map_addr;
+
+    //如果是fat
+    if (magic == FAT_CIGAM || magic == FAT_MAGIC)
+    {
+        struct fat_header* fh = (struct fat_header*)map_addr;
+
+        uint32_t nfat_arch = ntohl(fh->nfat_arch);
+        std::cout << "Detected Fat Binary with " << nfat_arch << std::endl;
+
+        struct fat_arch *arch = (struct fat_arch*)((u_int8_t*)map_addr + sizeof(struct fat_header));
+
+        for(uint32_t i = 0; i < nfat_arch; i++)
+        {
+            cpu_type_t cputype = ntohl(arch->cputype);
+            uint32_t offset = ntohl(arch->offset);
+            if(cputype == CPU_TYPE_ARM64) return offset;
+            arch++;
+        }
+        std::cerr << "Waring No ARM64 found in Fat Binary" << std::endl;
+        return 0;
+    }
+    return 0;
+
+ }
 
 int main(int argc, char* argv[]) {
     if (argc != 2) {
@@ -33,16 +69,20 @@ int main(int argc, char* argv[]) {
     void* map_addr = mmap(NULL, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
     if (map_addr == MAP_FAILED) ERROR_EXIT("mmap failed");
 
-    // 1. 解析 Header
-    struct mach_header_64* header = (struct mach_header_64*)map_addr;
+    uint32_t slice_offset = get_best_slice_offset(map_addr, st.st_size);
 
-    // 简单校验：只处理 64 位 Mach-O (非 Fat)
-    if (header->magic != MH_MAGIC_64) {
-        std::cerr << "[-] Skip: Not a direct 64-bit Mach-O (Might be Fat Binary)" << std::endl;
+    // 1. 解析 Header
+    struct mach_header_64* header = (struct mach_header_64*)((uint8_t*)map_addr + slice_offset);
+
+    if(header->magic != MH_MAGIC_64)
+    {
+        std::cerr << "ERROR: Target slice is not valid 64-bit Mach-O" << std::endl;
         munmap(map_addr, st.st_size);
         close(fd);
-        return 0;
+        return 1;
     }
+
+    
 
     std::cout << "[*] Parsing file: " << filepath << std::endl;
     std::cout << "[*] Total Commands: " << header->ncmds << std::endl;
