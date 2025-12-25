@@ -98,7 +98,7 @@ int main(int argc, char* argv[]) {
         // 把当前指针看作通用的 load_command 结构体，方便读取 cmd 和 cmdsize
         struct load_command* lc = (struct load_command*)cmd_ptr;
 
-        // 4. 判断是否为加载动态库的命令
+        
         if (lc->cmd == LC_LOAD_DYLIB) {
             // 强转为 dylib_command 结构体
             struct dylib_command* dylib_cmd = (struct dylib_command*)lc;
@@ -112,8 +112,34 @@ int main(int argc, char* argv[]) {
             std::cout << "    [+] Found Import: " << dylib_name << std::endl;
             dylib_list.push_back(std::string(dylib_name));
         }
+        
+        if(lc->cmd == LC_SEGMENT_64)
+        {
+            struct segment_command_64 *seg = (struct segment_command_64*)lc;
+            if(strncmp(seg->segname, "__TEXT", 6) == 0)
+            {
+                struct section_64 *sec = (struct section_64*)((uint8_t*)seg + sizeof(struct segment_command_64));
 
-        // 5. 【关键】指针步进：跳过当前命令的大小，指向下一条命令
+                for(uint32_t j = 0; j < seg->nsects; j++)
+                {
+                    if(strncmp(sec->sectname, "__text", 6) == 0)
+                    {
+                        std::cout << "    [!] Found Code Section (__text)" << std::endl;
+                        std::cout << "        Offset: " << sec->offset << std::endl;
+                        std::cout << "        Size:   " << sec->size << std::endl;
+                        uint8_t* code_ptr = (uint8_t*)header + sec->offset;
+                        std::cout << "        Opcode Header: ";
+                        for (int k = 0; k < 16 && k < sec->size; k++)
+                        {
+                            printf("%02x ", code_ptr[k]);
+                        }
+                        std::cout << "..." << std::endl;
+                    }
+                    sec++;
+                }
+            }
+        }
+        
         cmd_ptr += lc->cmdsize;
     }
 
