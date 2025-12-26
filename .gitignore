@@ -1,0 +1,12 @@
+# macOS 系统文件
+.DS_Store
+
+# C++ 编译产物
+*.o
+*.dSYM/
+minimacho
+main
+build/
+
+# 编辑器配置 (VS Code)
+.vscode/
