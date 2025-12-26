@@ -10,7 +10,8 @@
 #include <mach-o/loader.h>
 #include <mach-o/fat.h>
 #include <arpa/inet.h>
-#include <cctype>    // for isprint
+#include <cctype>
+#include <cmath>
 
 #define ERROR_EXIT(msg) { std::cerr << "Error: " << msg << std::endl; return 1; }
 
@@ -53,6 +54,36 @@ uint32_t get_best_slice_offset(void* map_addr, size_t size) {
         return 0;
     }
     return 0;
+}
+
+/**
+ * [Core Algorithm] 计算香农熵
+ * @param data: 二进制数据指针
+ * @param size: 数据大小
+ * @return: 熵值 (0.0 - 8.0)
+ */
+double calculate_entropy(const uint8_t* data, size_t size) {
+    if (size == 0) return 0.0;
+
+    // 1. 统计字节频率 (使用数组代替 map 提升性能)
+    uint64_t frequency[256] = {0};
+    for (size_t i = 0; i < size; i++) {
+        frequency[data[i]]++;
+    }
+
+    // 2. 计算熵
+    double entropy = 0.0;
+    double total = (double)size;
+
+    for (int i = 0; i < 256; i++) {
+        if (frequency[i] > 0) {
+            double p = frequency[i] / total;
+            // H = - sum(p * log2(p))
+            entropy -= p * std::log2(p); 
+        }
+    }
+
+    return entropy;
 }
 
 int main(int argc, char* argv[]) {
@@ -107,22 +138,18 @@ int main(int argc, char* argv[]) {
         // [特征2 & 3] 收集代码段与字符串段
         if (lc->cmd == LC_SEGMENT_64) {
             struct segment_command_64* seg = (struct segment_command_64*)lc;
-            
-            // 只有当段名为 __TEXT 时才深入解析 Section
-            if (strncmp(seg->segname, "__TEXT", 6) == 0) {
+            if (strncmp(seg->segname, "__TEXT", 6) == 0)
+            {
                 struct section_64* sec = (struct section_64*)((uint8_t*)seg + sizeof(struct segment_command_64));
-
-                for (uint32_t j = 0; j < seg->nsects; j++) {
-                    // A. 提取机器码 (__text)
-                    if (strncmp(sec->sectname, "__text", 6) == 0) {
-                        uint8_t* code_ptr = (uint8_t*)header + sec->offset;
-                        // 将原始字节存入 vector
-                        if (sec->size > 0) {
-                            feature_opcodes.insert(feature_opcodes.end(), code_ptr, code_ptr + sec->size);
-                        }
+                for (uint32_t j = 0; j < seg->nsects; j++)
+                {
+                    uint8_t* sec_data_ptr = (uint8_t*)header + sec->offset;
+                    if (sec->size > 0)
+                    {
+                        feature_opcodes.insert(feature_opcodes.end(), sec_data_ptr, sec_data_ptr + sec->size);
                     }
 
-                    // B. 提取字符串 (__cstring)
+
                     if (strncmp(sec->sectname, "__cstring", 16) == 0) {
                         uint8_t* str_ptr = (uint8_t*)header + sec->offset;
                         uint64_t size = sec->size;
@@ -133,7 +160,6 @@ int main(int argc, char* argv[]) {
                             if (isprint(c)) {
                                 temp_buffer += c;
                             } else {
-                                // 过滤逻辑：只有长度 > 4 才算有效特征
                                 if (temp_buffer.length() > 4) {
                                     feature_strings.push_back(temp_buffer);
                                 }
@@ -141,9 +167,10 @@ int main(int argc, char* argv[]) {
                             }
                         }
                     }
-                    sec++; // 下一个 section
+                    sec++;
                 }
             }
+            
         }
         cmd_ptr += lc->cmdsize;
     }
@@ -175,6 +202,12 @@ int main(int argc, char* argv[]) {
     }
     uint64_t hash_string_data = hash_djb2_string(string_blob);
 
+    double code_entropy = 0.0;
+    if (!feature_opcodes.empty()) {
+        code_entropy = calculate_entropy(feature_opcodes.data(), feature_opcodes.size());
+    }
+
+
     // --- 5. 最终报告输出 (Report) ---
     std::cout << "\n========== MiniMachO Analysis Report ==========" << std::endl;
     std::cout << "[INFO] Imports Found: " << feature_dylibs.size() << std::endl;
@@ -186,6 +219,21 @@ int main(int argc, char* argv[]) {
     std::cout << "2. Code Hash:   0x" << std::hex << hash_code << std::endl;
     std::cout << "3. String Hash: 0x" << std::hex << hash_string_data << std::endl;
     std::cout << "===============================================" << std::endl;
+
+    // 恢复十进制输出熵值
+    std::cout << std::dec << "[4] Entropy Score: " << code_entropy << " / 8.0" << std::endl;
+    
+    if (code_entropy > 7.2) {
+        std::cout << "    [!!!] WARNING: High Entropy detected!" << std::endl;
+        std::cout << "    [!!!] Suspicion: Packed or Encrypted payload." << std::endl;
+    } else if (code_entropy < 1.0) {
+         std::cout << "    [?] WARNING: Extremely Low Entropy." << std::endl;
+         std::cout << "    [?] Suspicion: Empty or padding-filled section." << std::endl;
+    } else {
+        std::cout << "    [+] Analysis: Normal code structure." << std::endl;
+    }
+    std::cout << "===========================================" << std::endl;
+
 
     munmap(map_addr, st.st_size);
     close(fd);
